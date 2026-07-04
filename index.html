@@ -388,7 +388,7 @@
 ========================================================= */
 const SUPABASE_URL = 'https://wtlkwjmchtvkuwspgrab.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind0bGt3am1jaHR2a3V3c3BncmFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMxMzk0NjUsImV4cCI6MjA5ODcxNTQ2NX0.XtxQ1mQaKDLM332XOGFnHSvHIX-_SbI0hDTlHMBFNXg';
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 async function sbCall(promise, errMsg){
   const { error } = await promise;
@@ -421,12 +421,12 @@ function uid(prefix){ return prefix + '-' + Math.random().toString(36).slice(2,7
 async function loadAll(){
   try{
     const [studentsRes, staffRes, gradesRes, feesRes, attendanceRes, timetableRes] = await Promise.all([
-      supabase.from('students').select('*'),
-      supabase.from('staff').select('*'),
-      supabase.from('grades').select('*'),
-      supabase.from('fees').select('*'),
-      supabase.from('attendance').select('*'),
-      supabase.from('timetable').select('*')
+      sb.from('students').select('*'),
+      sb.from('staff').select('*'),
+      sb.from('grades').select('*'),
+      sb.from('fees').select('*'),
+      sb.from('attendance').select('*'),
+      sb.from('timetable').select('*')
     ]);
     for(const r of [studentsRes, staffRes, gradesRes, feesRes, attendanceRes, timetableRes]){
       if(r.error) throw r.error;
@@ -453,14 +453,19 @@ async function loadAll(){
     // seed sample data on very first run (empty database)
     if(STATE.students.length===0 && STATE.staff.length===0){
       seedSampleData();
-      await sbCall(supabase.from('students').insert(STATE.students.map(toDbStudent)), 'Could not seed students');
-      await sbCall(supabase.from('staff').insert(STATE.staff.map(toDbStaff)), 'Could not seed staff');
-      await sbCall(supabase.from('grades').insert(STATE.grades.map(toDbGrade)), 'Could not seed grades');
-      await sbCall(supabase.from('fees').insert(STATE.fees.map(toDbFee)), 'Could not seed fees');
+      await sbCall(sb.from('students').insert(STATE.students.map(toDbStudent)), 'Could not seed students');
+      await sbCall(sb.from('staff').insert(STATE.staff.map(toDbStaff)), 'Could not seed staff');
+      await sbCall(sb.from('grades').insert(STATE.grades.map(toDbGrade)), 'Could not seed grades');
+      await sbCall(sb.from('fees').insert(STATE.fees.map(toDbFee)), 'Could not seed fees');
     }
   }catch(e){
-    console.error('Supabase load error', e);
-    showToast('Could not connect to database — check Supabase setup');
+    console.error('Supabase load error:', e && e.message, e);
+    const detail = (e && (e.message || e.details || e.hint)) || 'unknown error';
+    showToast('Could not connect to database: ' + detail);
+    const banner = document.createElement('div');
+    banner.style.cssText = 'background:#E8C4BC;color:#A63D2F;padding:12px 20px;font-family:monospace;font-size:13px;border-bottom:2px solid #A63D2F;';
+    banner.textContent = 'Database error: ' + detail + ' (open browser console for full details)';
+    document.body.prepend(banner);
   }
 }
 
@@ -668,11 +673,11 @@ async function saveStudent(id){
   if(id){
     const s = STATE.students.find(x=>x.id===id);
     Object.assign(s, data);
-    await sbCall(supabase.from('students').update(toDbStudent(s)).eq('id', id), 'Could not save student');
+    await sbCall(sb.from('students').update(toDbStudent(s)).eq('id', id), 'Could not save student');
   }else{
     const newStudent = {id:uid('STU'), ...data};
     STATE.students.push(newStudent);
-    await sbCall(supabase.from('students').insert(toDbStudent(newStudent)), 'Could not save student');
+    await sbCall(sb.from('students').insert(toDbStudent(newStudent)), 'Could not save student');
   }
   closeModal(); renderAll(); showToast('Student record saved');
 }
@@ -680,7 +685,7 @@ function editStudent(id){ openStudentModal(STATE.students.find(s=>s.id===id)); }
 async function deleteStudent(id){
   if(!confirm('Remove this student and their records reference? This cannot be undone.')) return;
   STATE.students = STATE.students.filter(s=>s.id!==id);
-  await sbCall(supabase.from('students').delete().eq('id', id), 'Could not delete student');
+  await sbCall(sb.from('students').delete().eq('id', id), 'Could not delete student');
   renderAll(); showToast('Student removed');
 }
 document.getElementById('add-student-btn').addEventListener('click', ()=>openStudentModal(null));
@@ -744,7 +749,7 @@ document.getElementById('att-save-btn').addEventListener('click', async ()=>{
   });
   if(!STATE.attendance[date]) STATE.attendance[date] = {};
   STATE.attendance[date][cls] = records;
-  await sbCall(supabase.from('attendance').upsert({ id: attRowId(date, cls), class_name: cls, date, data: records }), 'Could not save attendance');
+  await sbCall(sb.from('attendance').upsert({ id: attRowId(date, cls), class_name: cls, date, data: records }), 'Could not save attendance');
   renderDashboard();
   showToast('Attendance saved for '+cls);
 });
@@ -808,12 +813,12 @@ async function saveGrade(){
     subject, term: document.getElementById('g-term').value, score
   };
   STATE.grades.push(newGrade);
-  await sbCall(supabase.from('grades').insert(toDbGrade(newGrade)), 'Could not save grade');
+  await sbCall(sb.from('grades').insert(toDbGrade(newGrade)), 'Could not save grade');
   closeModal(); renderAll(); showToast('Grade recorded');
 }
 async function deleteGrade(id){
   STATE.grades = STATE.grades.filter(g=>g.id!==id);
-  await sbCall(supabase.from('grades').delete().eq('id', id), 'Could not delete grade');
+  await sbCall(sb.from('grades').delete().eq('id', id), 'Could not delete grade');
   renderAll(); showToast('Grade removed');
 }
 document.getElementById('add-grade-btn').addEventListener('click', openGradeModal);
@@ -985,17 +990,17 @@ async function saveFee(id){
   if(id){
     const f = STATE.fees.find(f=>f.id===id);
     Object.assign(f, data);
-    await sbCall(supabase.from('fees').update(toDbFee(f)).eq('id', id), 'Could not save fee entry');
+    await sbCall(sb.from('fees').update(toDbFee(f)).eq('id', id), 'Could not save fee entry');
   }else{
     const newFee = {id:uid('FE'), studentId: document.getElementById('fee-student').value, ...data};
     STATE.fees.push(newFee);
-    await sbCall(supabase.from('fees').insert(toDbFee(newFee)), 'Could not save fee entry');
+    await sbCall(sb.from('fees').insert(toDbFee(newFee)), 'Could not save fee entry');
   }
   closeModal(); renderAll(); showToast('Fee entry saved');
 }
 async function deleteFee(id){
   STATE.fees = STATE.fees.filter(f=>f.id!==id);
-  await sbCall(supabase.from('fees').delete().eq('id', id), 'Could not delete fee entry');
+  await sbCall(sb.from('fees').delete().eq('id', id), 'Could not delete fee entry');
   renderAll(); showToast('Fee entry removed');
 }
 document.getElementById('add-fee-btn').addEventListener('click', ()=>openFeeModal(null));
@@ -1056,12 +1061,12 @@ async function saveTTCell(cls, day, period){
   if(!STATE.timetable[cls][day]) STATE.timetable[cls][day] = {};
   const entry = { subject, teacher: document.getElementById('tt-teacher').value };
   STATE.timetable[cls][day][period] = entry;
-  await sbCall(supabase.from('timetable').upsert({ id: ttRowId(cls, day, period), class_name: cls, day, period, entry }), 'Could not save timetable slot');
+  await sbCall(sb.from('timetable').upsert({ id: ttRowId(cls, day, period), class_name: cls, day, period, entry }), 'Could not save timetable slot');
   closeModal(); renderTimetable(); showToast('Timetable updated');
 }
 async function clearTTCell(cls, day, period){
   if(STATE.timetable[cls] && STATE.timetable[cls][day]) delete STATE.timetable[cls][day][period];
-  await sbCall(supabase.from('timetable').delete().eq('id', ttRowId(cls, day, period)), 'Could not clear slot');
+  await sbCall(sb.from('timetable').delete().eq('id', ttRowId(cls, day, period)), 'Could not clear slot');
   closeModal(); renderTimetable(); showToast('Slot cleared');
 }
 document.getElementById('tt-class').addEventListener('change', renderTimetable);
@@ -1120,11 +1125,11 @@ async function saveStaff(id){
   if(id){
     const t = STATE.staff.find(t=>t.id===id);
     Object.assign(t, data);
-    await sbCall(supabase.from('staff').update(toDbStaff(t)).eq('id', id), 'Could not save staff record');
+    await sbCall(sb.from('staff').update(toDbStaff(t)).eq('id', id), 'Could not save staff record');
   }else{
     const newStaff = {id:uid('STF'), ...data};
     STATE.staff.push(newStaff);
-    await sbCall(supabase.from('staff').insert(toDbStaff(newStaff)), 'Could not save staff record');
+    await sbCall(sb.from('staff').insert(toDbStaff(newStaff)), 'Could not save staff record');
   }
   closeModal(); renderAll(); showToast('Staff record saved');
 }
@@ -1132,7 +1137,7 @@ function editStaff(id){ openStaffModal(STATE.staff.find(t=>t.id===id)); }
 async function deleteStaff(id){
   if(!confirm('Remove this staff member?')) return;
   STATE.staff = STATE.staff.filter(t=>t.id!==id);
-  await sbCall(supabase.from('staff').delete().eq('id', id), 'Could not delete staff member');
+  await sbCall(sb.from('staff').delete().eq('id', id), 'Could not delete staff member');
   renderAll(); showToast('Staff member removed');
 }
 document.getElementById('add-staff-btn').addEventListener('click', ()=>openStaffModal(null));
@@ -1143,12 +1148,12 @@ document.getElementById('add-staff-btn').addEventListener('click', ()=>openStaff
 document.getElementById('reset-link').addEventListener('click', async ()=>{
   if(!confirm('This clears all students, staff, grades, fees, attendance and timetable data. Continue?')) return;
   await Promise.all([
-    supabase.from('grades').delete().neq('id', '__none__'),
-    supabase.from('fees').delete().neq('id', '__none__'),
-    supabase.from('attendance').delete().neq('id', '__none__'),
-    supabase.from('timetable').delete().neq('id', '__none__'),
-    supabase.from('staff').delete().neq('id', '__none__'),
-    supabase.from('students').delete().neq('id', '__none__')
+    sb.from('grades').delete().neq('id', '__none__'),
+    sb.from('fees').delete().neq('id', '__none__'),
+    sb.from('attendance').delete().neq('id', '__none__'),
+    sb.from('timetable').delete().neq('id', '__none__'),
+    sb.from('staff').delete().neq('id', '__none__'),
+    sb.from('students').delete().neq('id', '__none__')
   ]);
   STATE = { students:[], attendance:{}, grades:[], fees:[], timetable:{}, staff:[] };
   renderAll();
