@@ -405,8 +405,6 @@ function toDbFee(f){ return { id:f.id, student_id:f.studentId, term:f.term, amou
 function fromDbFee(r){ return { id:r.id, studentId:r.student_id, term:r.term, amountDue:Number(r.amount_due), amountPaid:Number(r.amount_paid), dueDate:r.due_date }; }
 function attRowId(date, cls){ return (date+'_'+cls).replace(/[^a-zA-Z0-9_-]/g,'_'); }
 function ttRowId(cls, day, period){ return (cls+'_'+day+'_'+period).replace(/[^a-zA-Z0-9_-]/g,'_'); }
-<\/script>
-<script>
 /* =========================================================
    STATE
 ========================================================= */
