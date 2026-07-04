@@ -185,6 +185,20 @@
   .form-grid .full{grid-column:1/-1;}
   .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
 
+  /* ---------- Login screen ---------- */
+  .login-screen{
+    position:fixed;inset:0;background:var(--paper);
+    display:flex;align-items:center;justify-content:center;z-index:300;
+  }
+  .login-screen.hidden{display:none;}
+  .login-card{
+    background:#fff;border:1px solid var(--line);border-radius:10px;
+    padding:34px 30px;width:100%;max-width:320px;
+    box-shadow:0 20px 50px rgba(0,0,0,0.12);
+  }
+  .login-card input{width:100%;margin-bottom:4px;}
+  .app.hidden{display:none;}
+
   /* ---------- Attendance / Timetable grids ---------- */
   .att-list{display:flex;flex-direction:column;gap:8px;}
   .att-row{display:flex;align-items:center;justify-content:space-between;background:#fff;border:1px solid var(--line);border-radius:5px;padding:10px 14px;}
@@ -235,7 +249,18 @@
 </style>
 </head>
 <body>
-<div class="app">
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="stamp-logo" style="margin:0 auto 14px;">T</div>
+    <div class="rc-school" style="text-align:center;font-family:'Fraunces',serif;font-weight:700;font-size:20px;color:var(--ink);">Tebes School</div>
+    <div style="text-align:center;font-size:12.5px;color:var(--ink-soft);margin-bottom:22px;">Staff Sign-In</div>
+    <label class="field-label">Staff Password</label>
+    <input type="password" id="login-password" style="width:100%;margin-bottom:6px;" placeholder="Enter shared staff password">
+    <div id="login-error" style="color:var(--brick);font-size:12.5px;min-height:18px;margin-bottom:10px;"></div>
+    <button class="btn-primary" id="login-btn" style="width:100%;">Sign In</button>
+  </div>
+</div>
+<div class="app hidden" id="app-root">
   <aside class="sidebar">
     <div class="brand">
       <div class="stamp-logo">T</div>
@@ -253,7 +278,7 @@
       <div class="nav-item" data-panel="timetable"><span class="ic">05</span><span class="label-text">Timetable</span></div>
       <div class="nav-item" data-panel="staff"><span class="ic">06</span><span class="label-text">Staff</span></div>
     </nav>
-    <div class="sidebar-foot">Synced to Tebes database · <span id="reset-link" style="text-decoration:underline;cursor:pointer;">reset all</span></div>
+    <div class="sidebar-foot">Synced to Tebes database · <span id="reset-link" style="text-decoration:underline;cursor:pointer;">reset all</span> · <span id="logout-link" style="text-decoration:underline;cursor:pointer;">log out</span></div>
   </aside>
 
   <main>
@@ -405,6 +430,43 @@ function toDbFee(f){ return { id:f.id, student_id:f.studentId, term:f.term, amou
 function fromDbFee(r){ return { id:r.id, studentId:r.student_id, term:r.term, amountDue:Number(r.amount_due), amountPaid:Number(r.amount_paid), dueDate:r.due_date }; }
 function attRowId(date, cls){ return (date+'_'+cls).replace(/[^a-zA-Z0-9_-]/g,'_'); }
 function ttRowId(cls, day, period){ return (cls+'_'+day+'_'+period).replace(/[^a-zA-Z0-9_-]/g,'_'); }
+
+/* =========================================================
+   AUTH (shared staff login)
+========================================================= */
+const STAFF_LOGIN_EMAIL = 'staff@tebes.ac.ke';
+
+function showLoginScreen(){
+  document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('app-root').classList.add('hidden');
+}
+function showApp(){
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app-root').classList.remove('hidden');
+}
+async function attemptLogin(){
+  const password = document.getElementById('login-password').value;
+  const errBox = document.getElementById('login-error');
+  errBox.textContent = '';
+  if(!password){ errBox.textContent = 'Enter the staff password.'; return; }
+  const { error } = await sb.auth.signInWithPassword({ email: STAFF_LOGIN_EMAIL, password });
+  if(error){
+    errBox.textContent = 'Incorrect password. Try again.';
+    console.error('Login error:', error.message);
+    return;
+  }
+  document.getElementById('login-password').value = '';
+  showApp();
+  await loadAll();
+  renderAll();
+}
+document.getElementById('login-btn').addEventListener('click', attemptLogin);
+document.getElementById('login-password').addEventListener('keydown', (e)=>{ if(e.key==='Enter') attemptLogin(); });
+document.getElementById('logout-link').addEventListener('click', async ()=>{
+  await sb.auth.signOut();
+  showLoginScreen();
+});
+
 /* =========================================================
    STATE
 ========================================================= */
@@ -1174,7 +1236,12 @@ function renderAll(){
 }
 
 (async function init(){
-  document.getElementById('content-loading');
+  const { data: { session } } = await sb.auth.getSession();
+  if(!session){
+    showLoginScreen();
+    return;
+  }
+  showApp();
   try{
     await loadAll();
   }catch(e){
