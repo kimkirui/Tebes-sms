@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tebes School — Registrar</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2F80B8">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tebes School">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -98,6 +104,20 @@
   }
   .topbar h1{font-family:'Fraunces',serif;font-size:24px;font-weight:600;margin:0;color:var(--ink);}
   .topbar .today{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink-soft);}
+  .topbar-right{display:flex;align-items:center;gap:14px;}
+  .sync-badge{
+    display:flex;align-items:center;gap:6px;
+    font-family:'JetBrains Mono',monospace;font-size:11px;
+    padding:5px 10px;border-radius:20px;
+    background:var(--ok-soft);color:var(--ok);
+    white-space:nowrap;
+    cursor:default;
+  }
+  .sync-badge.offline{background:var(--brick-soft);color:var(--brick);}
+  .sync-badge.pending{background:var(--amber-soft);color:var(--amber);cursor:pointer;}
+  .sync-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;}
+  .sync-dot.blink{animation:syncblink 1.1s ease-in-out infinite;}
+  @keyframes syncblink{0%,100%{opacity:1;}50%{opacity:0.25;}}
   .content{padding:28px 34px 60px;overflow-y:auto;}
 
   .panel{display:none;}
@@ -278,13 +298,16 @@
       <div class="nav-item" data-panel="timetable"><span class="ic">05</span><span class="label-text">Timetable</span></div>
       <div class="nav-item" data-panel="staff"><span class="ic">06</span><span class="label-text">Staff</span></div>
     </nav>
-    <div class="sidebar-foot">Synced to Tebes database · <span id="reset-link" style="text-decoration:underline;cursor:pointer;">reset all</span> · <span id="logout-link" style="text-decoration:underline;cursor:pointer;">log out</span></div>
+    <div class="sidebar-foot">Tebes database · <span id="reset-link" style="text-decoration:underline;cursor:pointer;">reset all</span> · <span id="logout-link" style="text-decoration:underline;cursor:pointer;">log out</span></div>
   </aside>
 
   <main>
     <div class="topbar">
       <h1 id="page-title">Dashboard</h1>
-      <div class="today" id="today-date"></div>
+      <div class="topbar-right">
+        <div class="sync-badge" id="sync-badge" title="Connection status"><span class="sync-dot" id="sync-dot"></span><span id="sync-label">Online</span></div>
+        <div class="today" id="today-date"></div>
+      </div>
     </div>
     <div class="content">
 
@@ -432,6 +455,119 @@ function attRowId(date, cls){ return (date+'_'+cls).replace(/[^a-zA-Z0-9_-]/g,'_
 function ttRowId(cls, day, period){ return (cls+'_'+day+'_'+period).replace(/[^a-zA-Z0-9_-]/g,'_'); }
 
 /* =========================================================
+   OFFLINE ENGINE (local cache + write queue + sync)
+========================================================= */
+const CACHE_KEY = 'tsms_state_cache_v1';
+const QUEUE_KEY = 'tsms_sync_queue_v1';
+let isSyncing = false;
+
+function loadStateCache(){
+  try{
+    const raw = localStorage.getItem(CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ console.error('Cache read error', e); return null; }
+}
+function saveStateCache(){
+  try{ localStorage.setItem(CACHE_KEY, JSON.stringify(STATE)); }catch(e){ console.error('Cache write error', e); }
+}
+function getQueue(){
+  try{ return JSON.parse(localStorage.getItem(QUEUE_KEY)) || []; }catch(e){ return []; }
+}
+function setQueue(q){
+  try{ localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); }catch(e){ console.error('Queue write error', e); }
+  updateSyncBadge();
+}
+function queueOp(table, op, payload, matchId){
+  const q = getQueue();
+  q.push({ opId: uid('OP'), table, op, payload, matchId, ts: Date.now() });
+  setQueue(q);
+}
+
+async function execOp(table, op, payload, matchId){
+  if(op==='insert') return sb.from(table).insert(payload);
+  if(op==='update') return sb.from(table).update(payload).eq('id', matchId);
+  if(op==='upsert') return sb.from(table).upsert(payload);
+  if(op==='delete') return sb.from(table).delete().eq('id', matchId);
+  return { error: new Error('Unknown op: '+op) };
+}
+
+// Every mutating action calls this instead of talking to Supabase directly.
+// Online: writes straight through. Offline (or a flaky connection): the
+// change is applied to local STATE already by the caller, cached to
+// localStorage, and queued to replay against Supabase once back online.
+async function dbWrite(table, op, payload, matchId){
+  if(!navigator.onLine){
+    queueOp(table, op, payload, matchId);
+    saveStateCache();
+    return true;
+  }
+  try{
+    const { error } = await execOp(table, op, payload, matchId);
+    if(error) throw error;
+    saveStateCache();
+    return true;
+  }catch(e){
+    console.error('Write failed, queuing for retry:', e);
+    queueOp(table, op, payload, matchId);
+    saveStateCache();
+    showToast('Offline — saved on this device, will sync later');
+    return true;
+  }
+}
+
+async function flushQueue(){
+  if(!navigator.onLine || isSyncing) return;
+  const q = getQueue();
+  if(q.length===0){ updateSyncBadge(); return; }
+  isSyncing = true;
+  updateSyncBadge();
+  const remaining = [];
+  let succeeded = 0;
+  for(const item of q){
+    try{
+      const { error } = await execOp(item.table, item.op, item.payload, item.matchId);
+      if(error) throw error;
+      succeeded++;
+    }catch(e){
+      console.error('Sync failed for queued op, will retry later:', item, e);
+      remaining.push(item);
+    }
+  }
+  setQueue(remaining);
+  isSyncing = false;
+  if(succeeded>0 && remaining.length===0) showToast('All offline changes synced ✓');
+  else if(remaining.length>0) showToast(remaining.length+' change(s) still waiting to sync');
+  updateSyncBadge();
+}
+
+function updateSyncBadge(){
+  const badge = document.getElementById('sync-badge');
+  const dot = document.getElementById('sync-dot');
+  const label = document.getElementById('sync-label');
+  if(!badge) return;
+  const pending = getQueue().length;
+  badge.classList.remove('offline','pending');
+  dot.classList.remove('blink');
+  if(!navigator.onLine){
+    badge.classList.add('offline');
+    label.textContent = pending>0 ? `Offline · ${pending} pending` : 'Offline';
+  }else if(isSyncing){
+    badge.classList.add('pending');
+    dot.classList.add('blink');
+    label.textContent = 'Syncing…';
+  }else if(pending>0){
+    badge.classList.add('pending');
+    label.textContent = `${pending} pending — tap to sync`;
+  }else{
+    label.textContent = 'Online';
+  }
+}
+document.getElementById('sync-badge').addEventListener('click', ()=>{ if(navigator.onLine) flushQueue(); });
+window.addEventListener('online', ()=>{ updateSyncBadge(); flushQueue(); });
+window.addEventListener('offline', updateSyncBadge);
+setInterval(()=>{ if(navigator.onLine) flushQueue(); }, 30000);
+
+/* =========================================================
    AUTH (shared staff login)
 ========================================================= */
 const STAFF_LOGIN_EMAIL = 'kimkirui3967@gmail.com';
@@ -449,6 +585,7 @@ async function attemptLogin(){
   const errBox = document.getElementById('login-error');
   errBox.textContent = '';
   if(!password){ errBox.textContent = 'Enter the staff password.'; return; }
+  if(!navigator.onLine){ errBox.textContent = 'No internet connection — the very first sign-in on a device needs to be online.'; return; }
   const { error } = await sb.auth.signInWithPassword({ email: STAFF_LOGIN_EMAIL, password });
   if(error){
     errBox.textContent = 'Incorrect password. Try again.';
@@ -481,6 +618,28 @@ function uid(prefix){ return prefix + '-' + Math.random().toString(36).slice(2,7
    STORAGE HELPERS (Supabase)
 ========================================================= */
 async function loadAll(){
+  // 1. Always load whatever we have cached locally first, so the app
+  //    renders instantly even with zero connectivity.
+  const cached = loadStateCache();
+  if(cached) STATE = cached;
+  updateSyncBadge();
+
+  if(!navigator.onLine){
+    if(!cached){
+      showToast('No internet yet and nothing saved on this device — connect once to load the school database.');
+    }
+    return;
+  }
+
+  // 2. Online: try to push any offline edits first so we don't clobber
+  //    them with a fresh server fetch.
+  await flushQueue();
+  if(getQueue().length>0){
+    // Some offline edits still haven't made it to the server — keep
+    // showing local state rather than overwriting it with server data.
+    return;
+  }
+
   try{
     const [studentsRes, staffRes, gradesRes, feesRes, attendanceRes, timetableRes] = await Promise.all([
       sb.from('students').select('*'),
@@ -520,14 +679,20 @@ async function loadAll(){
       await sbCall(sb.from('grades').insert(STATE.grades.map(toDbGrade)), 'Could not seed grades');
       await sbCall(sb.from('fees').insert(STATE.fees.map(toDbFee)), 'Could not seed fees');
     }
+    saveStateCache();
   }catch(e){
     console.error('Supabase load error:', e && e.message, e);
-    const detail = (e && (e.message || e.details || e.hint)) || 'unknown error';
-    showToast('Could not connect to database: ' + detail);
-    const banner = document.createElement('div');
-    banner.style.cssText = 'background:#E8C4BC;color:#A63D2F;padding:12px 20px;font-family:monospace;font-size:13px;border-bottom:2px solid #A63D2F;';
-    banner.textContent = 'Database error: ' + detail + ' (open browser console for full details)';
-    document.body.prepend(banner);
+    if(cached){
+      // We already have local data on screen; a failed refresh isn't fatal.
+      showToast('Could not refresh from server — showing data saved on this device');
+    }else{
+      const detail = (e && (e.message || e.details || e.hint)) || 'unknown error';
+      showToast('Could not connect to database: ' + detail);
+      const banner = document.createElement('div');
+      banner.style.cssText = 'background:#E8C4BC;color:#A63D2F;padding:12px 20px;font-family:monospace;font-size:13px;border-bottom:2px solid #A63D2F;';
+      banner.textContent = 'Database error: ' + detail + ' (open browser console for full details)';
+      document.body.prepend(banner);
+    }
   }
 }
 
@@ -735,11 +900,11 @@ async function saveStudent(id){
   if(id){
     const s = STATE.students.find(x=>x.id===id);
     Object.assign(s, data);
-    await sbCall(sb.from('students').update(toDbStudent(s)).eq('id', id), 'Could not save student');
+    await dbWrite('students', 'update', toDbStudent(s), id);
   }else{
     const newStudent = {id:uid('STU'), ...data};
     STATE.students.push(newStudent);
-    await sbCall(sb.from('students').insert(toDbStudent(newStudent)), 'Could not save student');
+    await dbWrite('students', 'insert', toDbStudent(newStudent));
   }
   closeModal(); renderAll(); showToast('Student record saved');
 }
@@ -747,7 +912,7 @@ function editStudent(id){ openStudentModal(STATE.students.find(s=>s.id===id)); }
 async function deleteStudent(id){
   if(!confirm('Remove this student and their records reference? This cannot be undone.')) return;
   STATE.students = STATE.students.filter(s=>s.id!==id);
-  await sbCall(sb.from('students').delete().eq('id', id), 'Could not delete student');
+  await dbWrite('students', 'delete', null, id);
   renderAll(); showToast('Student removed');
 }
 document.getElementById('add-student-btn').addEventListener('click', ()=>openStudentModal(null));
@@ -811,7 +976,7 @@ document.getElementById('att-save-btn').addEventListener('click', async ()=>{
   });
   if(!STATE.attendance[date]) STATE.attendance[date] = {};
   STATE.attendance[date][cls] = records;
-  await sbCall(sb.from('attendance').upsert({ id: attRowId(date, cls), class_name: cls, date, data: records }), 'Could not save attendance');
+  await dbWrite('attendance', 'upsert', { id: attRowId(date, cls), class_name: cls, date, data: records });
   renderDashboard();
   showToast('Attendance saved for '+cls);
 });
@@ -875,12 +1040,12 @@ async function saveGrade(){
     subject, term: document.getElementById('g-term').value, score
   };
   STATE.grades.push(newGrade);
-  await sbCall(sb.from('grades').insert(toDbGrade(newGrade)), 'Could not save grade');
+  await dbWrite('grades', 'insert', toDbGrade(newGrade));
   closeModal(); renderAll(); showToast('Grade recorded');
 }
 async function deleteGrade(id){
   STATE.grades = STATE.grades.filter(g=>g.id!==id);
-  await sbCall(sb.from('grades').delete().eq('id', id), 'Could not delete grade');
+  await dbWrite('grades', 'delete', null, id);
   renderAll(); showToast('Grade removed');
 }
 document.getElementById('add-grade-btn').addEventListener('click', openGradeModal);
@@ -1052,17 +1217,17 @@ async function saveFee(id){
   if(id){
     const f = STATE.fees.find(f=>f.id===id);
     Object.assign(f, data);
-    await sbCall(sb.from('fees').update(toDbFee(f)).eq('id', id), 'Could not save fee entry');
+    await dbWrite('fees', 'update', toDbFee(f), id);
   }else{
     const newFee = {id:uid('FE'), studentId: document.getElementById('fee-student').value, ...data};
     STATE.fees.push(newFee);
-    await sbCall(sb.from('fees').insert(toDbFee(newFee)), 'Could not save fee entry');
+    await dbWrite('fees', 'insert', toDbFee(newFee));
   }
   closeModal(); renderAll(); showToast('Fee entry saved');
 }
 async function deleteFee(id){
   STATE.fees = STATE.fees.filter(f=>f.id!==id);
-  await sbCall(sb.from('fees').delete().eq('id', id), 'Could not delete fee entry');
+  await dbWrite('fees', 'delete', null, id);
   renderAll(); showToast('Fee entry removed');
 }
 document.getElementById('add-fee-btn').addEventListener('click', ()=>openFeeModal(null));
@@ -1123,12 +1288,12 @@ async function saveTTCell(cls, day, period){
   if(!STATE.timetable[cls][day]) STATE.timetable[cls][day] = {};
   const entry = { subject, teacher: document.getElementById('tt-teacher').value };
   STATE.timetable[cls][day][period] = entry;
-  await sbCall(sb.from('timetable').upsert({ id: ttRowId(cls, day, period), class_name: cls, day, period, entry }), 'Could not save timetable slot');
+  await dbWrite('timetable', 'upsert', { id: ttRowId(cls, day, period), class_name: cls, day, period, entry });
   closeModal(); renderTimetable(); showToast('Timetable updated');
 }
 async function clearTTCell(cls, day, period){
   if(STATE.timetable[cls] && STATE.timetable[cls][day]) delete STATE.timetable[cls][day][period];
-  await sbCall(sb.from('timetable').delete().eq('id', ttRowId(cls, day, period)), 'Could not clear slot');
+  await dbWrite('timetable', 'delete', null, ttRowId(cls, day, period));
   closeModal(); renderTimetable(); showToast('Slot cleared');
 }
 document.getElementById('tt-class').addEventListener('change', renderTimetable);
@@ -1187,11 +1352,11 @@ async function saveStaff(id){
   if(id){
     const t = STATE.staff.find(t=>t.id===id);
     Object.assign(t, data);
-    await sbCall(sb.from('staff').update(toDbStaff(t)).eq('id', id), 'Could not save staff record');
+    await dbWrite('staff', 'update', toDbStaff(t), id);
   }else{
     const newStaff = {id:uid('STF'), ...data};
     STATE.staff.push(newStaff);
-    await sbCall(sb.from('staff').insert(toDbStaff(newStaff)), 'Could not save staff record');
+    await dbWrite('staff', 'insert', toDbStaff(newStaff));
   }
   closeModal(); renderAll(); showToast('Staff record saved');
 }
@@ -1199,7 +1364,7 @@ function editStaff(id){ openStaffModal(STATE.staff.find(t=>t.id===id)); }
 async function deleteStaff(id){
   if(!confirm('Remove this staff member?')) return;
   STATE.staff = STATE.staff.filter(t=>t.id!==id);
-  await sbCall(sb.from('staff').delete().eq('id', id), 'Could not delete staff member');
+  await dbWrite('staff', 'delete', null, id);
   renderAll(); showToast('Staff member removed');
 }
 document.getElementById('add-staff-btn').addEventListener('click', ()=>openStaffModal(null));
@@ -1208,6 +1373,8 @@ document.getElementById('add-staff-btn').addEventListener('click', ()=>openStaff
    RESET
 ========================================================= */
 document.getElementById('reset-link').addEventListener('click', async ()=>{
+  if(!navigator.onLine){ showToast('Connect to the internet before resetting data'); return; }
+  if(getQueue().length>0){ showToast('You have unsynced offline changes — reconnect and wait for sync before resetting'); return; }
   if(!confirm('This clears all students, staff, grades, fees, attendance and timetable data. Continue?')) return;
   await Promise.all([
     sb.from('grades').delete().neq('id', '__none__'),
@@ -1218,6 +1385,7 @@ document.getElementById('reset-link').addEventListener('click', async ()=>{
     sb.from('students').delete().neq('id', '__none__')
   ]);
   STATE = { students:[], attendance:{}, grades:[], fees:[], timetable:{}, staff:[] };
+  setQueue([]);
   renderAll();
   showToast('All data cleared');
 });
@@ -1226,6 +1394,8 @@ document.getElementById('reset-link').addEventListener('click', async ()=>{
    GLOBAL RENDER + INIT
 ========================================================= */
 function renderAll(){
+  saveStateCache();
+  updateSyncBadge();
   renderDashboard();
   renderStudents();
   renderAttendance();
@@ -1236,7 +1406,17 @@ function renderAll(){
 }
 
 (async function init(){
-  const { data: { session } } = await sb.auth.getSession();
+  if('serviceWorker' in navigator){
+    try{ await navigator.serviceWorker.register('sw.js'); }
+    catch(e){ console.error('Service worker registration failed:', e); }
+  }
+  let session = null;
+  try{
+    const res = await sb.auth.getSession();
+    session = res.data.session;
+  }catch(e){
+    console.error('getSession failed (likely offline):', e);
+  }
   if(!session){
     showLoginScreen();
     return;
